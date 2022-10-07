@@ -2,12 +2,14 @@
 
 use std::{
     ffi::CString,
-    os::raw::{c_char, c_int, c_void},
+    os::raw::{c_char, c_int, c_uint, c_void},
 };
 
 use crate::{
     codec::CodecParameters,
+    packet::{PacketSideData, PacketSideDataType},
     time::{TimeBase, Timestamp},
+    Error,
 };
 
 extern "C" {
@@ -24,12 +26,21 @@ extern "C" {
         value: *const c_char,
     ) -> c_int;
     fn ffw_stream_set_id(stream: *mut c_void, id: c_int);
+    fn ffw_stream_get_nb_side_data(stream: *const c_void) -> c_uint;
+    fn ffw_stream_get_side_data(stream: *const c_void, index: c_uint) -> *mut c_void;
+    fn ffw_stream_add_side_data(
+        stream: *mut c_void,
+        data_type: c_int,
+        data: *const c_void,
+        size: u64,
+    ) -> c_int;
 }
 
 /// Stream.
 pub struct Stream {
     ptr: *mut c_void,
     time_base: TimeBase,
+    side_data: Vec<PacketSideData>,
 }
 
 impl Stream {
@@ -40,9 +51,21 @@ impl Stream {
 
         ffw_stream_get_time_base(ptr, &mut num, &mut den);
 
+        let side_data = {
+            let len = ffw_stream_get_nb_side_data(ptr);
+            let mut side_data = Vec::with_capacity(len as usize);
+            for index in 0..len {
+                side_data.push(PacketSideData::from_raw_ptr(ffw_stream_get_side_data(
+                    ptr, index,
+                )));
+            }
+            side_data
+        };
+
         Stream {
             ptr,
             time_base: TimeBase::new(num, den),
+            side_data,
         }
     }
 
@@ -124,6 +147,36 @@ impl Stream {
     /// Set stream id.
     pub fn set_stream_id(&mut self, id: i32) {
         unsafe { ffw_stream_set_id(self.ptr, id as c_int) };
+    }
+
+    pub fn side_data(&self) -> &[PacketSideData] {
+        &self.side_data
+    }
+
+    pub fn add_side_data(
+        &mut self,
+        data_type: PacketSideDataType,
+        data: &[u8],
+    ) -> Result<(), Error> {
+        let ret = unsafe {
+            ffw_stream_add_side_data(
+                self.ptr,
+                data_type.into_raw(),
+                data.as_ptr() as *const _,
+                data.len() as u64,
+            )
+        };
+
+        if ret < 0 {
+            return Err(Error::from_raw_error_code(ret));
+        }
+
+        self.side_data.push({
+            let raw = unsafe { ffw_stream_get_side_data(self.ptr, self.side_data.len() as u32) };
+            unsafe { PacketSideData::from_raw_ptr(raw) }
+        });
+
+        Ok(())
     }
 }
 
